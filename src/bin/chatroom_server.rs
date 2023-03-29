@@ -34,12 +34,14 @@ use tokio_tungstenite::tungstenite::Message;
 type Tx = UnboundedSender<Message>;
 type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
 
-async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: SocketAddr) {
+async fn handle_connection(
+    peer_map: PeerMap,
+    raw_stream: TcpStream,
+    addr: SocketAddr,
+) -> eyre::Result<()> {
     println!("Incoming TCP connection from: {}", addr);
 
-    let ws_stream = tokio_tungstenite::accept_async(raw_stream)
-        .await
-        .expect("Error during the websocket handshake occurred");
+    let ws_stream = tokio_tungstenite::accept_async(raw_stream).await?;
     println!("WebSocket connection established: {}", addr);
 
     // Insert the write part of this peer to the peer map.
@@ -76,6 +78,7 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
 
     println!("{} disconnected", &addr);
     peer_map.lock().unwrap().remove(&addr);
+    Ok(())
 }
 
 #[tokio::main]

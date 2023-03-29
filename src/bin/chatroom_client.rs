@@ -111,6 +111,12 @@ impl Application for ChatRoom {
                         name: name.clone(),
                         data: msg,
                     });
+                    self.msg_id += 1;
+                    self.message_queue.push_back((true, msg.clone()));
+                    if self.message_queue.len() > 100 {
+                        self.message_queue.pop_front();
+                    }
+                    self.log_queue.push_back(format!("Sending {}", self.msg_id));
                     let mut sender = connection.clone();
                     iced::Command::perform(async move { sender.send(msg).await }, |res| match res {
                         Ok(_) => Message::Sent,
@@ -178,13 +184,12 @@ impl Application for ChatRoom {
             .iter()
             .map(|msg| match &msg.1 {
                 WebSocketMessage::UserMessage(data) => {
-                    let text = text(format!("{}: {}", data.name, data.data))
-                        .size(20)
-                        .style(Color::from_rgb8(0, 51, 102));
+                    let text = text(format!("{}: {}", data.name, data.data)).size(20);
+
                     let text = if msg.0 {
                         text.style(Color::from_rgb8(204, 51, 0))
                     } else {
-                        text
+                        text.style(Color::from_rgb8(0, 51, 102))
                     };
                     text.into()
                 }
@@ -200,10 +205,14 @@ impl Application for ChatRoom {
                     .into()
             })
             .collect();
-        let msg_col = column(chat_messages)
-            .spacing(5)
-            .align_items(Alignment::Start);
-        let log_col = column(logs).spacing(5).align_items(Alignment::Start);
+        let msg_col = scrollable(
+            column(chat_messages)
+                .spacing(5)
+                .align_items(Alignment::Start),
+        )
+        .height(Length::FillPortion(8));
+        let log_col = scrollable(column(logs).spacing(5).align_items(Alignment::Start))
+            .height(Length::FillPortion(2));
         let msg_log_row = row(vec![msg_col.into(), log_col.into()])
             .spacing(5)
             .align_items(Alignment::Start);
