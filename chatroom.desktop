@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=chatroom
+Exec=/home/sjq/.cargo/bin/websocket_chatroom
+Path=/home/sjq/.cargo/bin
+Type=Application
+Icon=Alacritty

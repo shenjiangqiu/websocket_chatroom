@@ -65,7 +65,7 @@ impl Application for SpmspmMonitor {
     }
 
     fn title(&self) -> String {
-        String::from("Counter - Iced")
+        String::from("chatroom")
     }
 
     fn update(&mut self, message: Message) -> iced::Command<Message> {
