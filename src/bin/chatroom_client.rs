@@ -14,7 +14,7 @@ pub fn main() -> eyre::Result<()> {
     let cli = Cli::parse();
     let socket_addr = cli
         .socket_addr
-        .unwrap_or("ws://127.0.0.1:2233".to_string())
+        .unwrap_or("wss://chat.thesjq.com".to_string())
         .parse()?;
     println!("socket_addr: {:?}", socket_addr);
     let mut settings = Settings::with_flags(socket_addr);
