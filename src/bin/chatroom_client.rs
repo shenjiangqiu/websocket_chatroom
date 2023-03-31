@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use clap::Parser;
+use iced::keyboard::KeyCode;
 use iced::widget::{button, column, row, scrollable, text, text_input};
 use iced::{Alignment, Application, Color, Element, Length, Settings};
 use websocket_chatroom::{Connection, MessageData, WebSocketMessage};
@@ -44,8 +45,9 @@ enum Message {
     Disconnected(String),
     MessageReceived(WebSocketMessage),
     InputChange(String),
-    Send(String),
+    Send,
     Sent,
+    Clear,
     Exit,
 }
 
@@ -100,17 +102,19 @@ impl Application for ChatRoom {
             Message::Exit => {
                 std::process::exit(0);
             }
-            Message::Send(msg) => match &self.app_status {
+            Message::Send => match &self.app_status {
                 AppStatus::Disconnected => {
                     self.current_message = Some("Disconnected, cannot send".to_string());
                     iced::Command::none()
                 }
                 AppStatus::Connected(connection, id, name) => {
+                    let msg = self.input_message.clone();
                     let msg = WebSocketMessage::UserMessage(MessageData {
                         id: *id,
                         name: name.clone(),
                         data: msg,
                     });
+                    self.input_message = String::new();
                     self.msg_id += 1;
                     self.message_queue.push_back((true, msg.clone()));
                     if self.message_queue.len() > 100 {
@@ -135,19 +139,38 @@ impl Application for ChatRoom {
                 self.input_message = input;
                 iced::Command::none()
             }
+            Message::Clear => {
+                self.message_queue.clear();
+                self.log_queue.clear();
+                iced::Command::none()
+            }
         }
     }
 
     fn subscription(&self) -> iced::Subscription<Self::Message> {
-        websocket_chatroom::connect(&self.server_url).map(|event| match event {
-            websocket_chatroom::Event::Connected(sender) => Message::Connected(sender, 0),
-            websocket_chatroom::Event::Disconnected => {
-                Message::Disconnected("Disconnected".to_string())
-            }
-            websocket_chatroom::Event::MessageReceived(message) => {
-                Message::MessageReceived(message)
-            }
-        })
+        let web_socket_sub =
+            websocket_chatroom::connect(&self.server_url).map(|event| match event {
+                websocket_chatroom::Event::Connected(sender) => Message::Connected(sender, 0),
+                websocket_chatroom::Event::Disconnected => {
+                    Message::Disconnected("Disconnected".to_string())
+                }
+                websocket_chatroom::Event::MessageReceived(message) => {
+                    Message::MessageReceived(message)
+                }
+            });
+        let func: fn(iced::Event, iced::event::Status) -> Option<Message> =
+            |event, _status| match event {
+                iced::Event::Keyboard(key) => match key {
+                    iced::keyboard::Event::KeyReleased {
+                        key_code,
+                        modifiers: _,
+                    } if key_code == KeyCode::Enter => Some(Message::Send),
+                    _ => None,
+                },
+                _ => None,
+            };
+        let key_board_sub = iced::subscription::events_with(func);
+        iced::Subscription::batch(vec![web_socket_sub, key_board_sub])
     }
 
     fn view(&self) -> Element<Message> {
@@ -157,11 +180,10 @@ impl Application for ChatRoom {
         };
         let status_text = text(status).size(20).style(Color::from_rgb8(102, 102, 153));
 
-        let send_bt = button("send")
-            .padding(5)
-            .on_press(Message::Send(self.input_message.clone()));
+        let send_bt = button("send").padding(5).on_press(Message::Send);
         let exit_bt = button("exit").padding(5).on_press(Message::Exit);
-        let bt_row = row(vec![send_bt.into(), exit_bt.into()])
+        let clear_bt = button("clear").padding(5).on_press(Message::Clear);
+        let bt_row = row(vec![send_bt.into(), exit_bt.into(), clear_bt.into()])
             .padding(10)
             .spacing(3)
             .align_items(Alignment::Center);
@@ -207,15 +229,24 @@ impl Application for ChatRoom {
             .collect();
         let msg_col = scrollable(
             column(chat_messages)
-                .spacing(5)
-                .align_items(Alignment::Start),
+                .spacing(15)
+                .align_items(Alignment::Start)
+                .width(Length::FillPortion(8))
+                .padding(15),
         )
-        .height(Length::FillPortion(8));
-        let log_col = scrollable(column(logs).spacing(5).align_items(Alignment::Start))
-            .height(Length::FillPortion(2));
+        .height(Length::Fill);
+        let log_col = scrollable(
+            column(logs)
+                .spacing(15)
+                .align_items(Alignment::End)
+                .width(Length::FillPortion(2))
+                .padding(15),
+        )
+        .height(Length::Fill);
         let msg_log_row = row(vec![msg_col.into(), log_col.into()])
-            .spacing(5)
-            .align_items(Alignment::Start);
+            .spacing(15)
+            .align_items(Alignment::Start)
+            .width(Length::Fill);
         let col = column(vec![
             status_text.into(),
             bt_row.into(),
