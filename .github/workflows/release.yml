@@ -1,15 +1,19 @@
-- name: Rust Release
-  # You may pin to the exact commit or the version.
-  # uses: manoadamro/rust-release@028b5d008bac5437257ec3ec905b12aed11e766a
-  uses: manoadamro/rust-release@v1
-  with:
-    # Github Repo Owner
-    owner: shenjiangqiu
-    # Github Repo
-    repo: websocket_chatroom
-    # Github Token
-    token: 
-    # Cargo.toml path
-    cargo: # default is Cargo.toml
-    # do not actually create release
-    dry_run: # default is false
+name: release
+on:
+  push
+jobs:
+  release:
+    runs-on: ubuntu
+    steps:
+      - name: Rust Release
+        # You may pin to the exact commit or the version.
+        # uses: manoadamro/rust-release@028b5d008bac5437257ec3ec905b12aed11e766a
+        uses: manoadamro/rust-release@v1
+        with:
+          # Github Repo Owner
+          owner: shenjiangqiu
+          # Github Repo
+          repo: websocket_chatroom
+          # Github Token
+          token: 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
+
