@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::process;
 
 use clap::Parser;
+use iced::clipboard;
 use iced::keyboard::KeyCode;
 use iced::widget::{button, column, row, scrollable, text, text_input};
 use iced::{Alignment, Application, Color, Element, Length, Settings};
@@ -35,6 +36,7 @@ enum ConnectionStatus {
     },
 }
 enum Page {
+    /// the sender to send the url
     Welcome(Sender<String>),
     Main {
         connections_status: ConnectionStatus,
@@ -71,6 +73,7 @@ enum Message {
     InputChange(String),
     UserNameChange(String),
     UrlChange(String),
+    Copy(String),
     Send,
     Sent,
     Clear,
@@ -262,6 +265,7 @@ impl Application for ChatRoom {
             Message::Exit => {
                 process::exit(0);
             }
+            Message::Copy(text) => clipboard::write(text),
         }
     }
 
@@ -400,7 +404,11 @@ fn build_msg_and_log(
                 } else {
                     text.style(Color::from_rgb8(0, 51, 102))
                 };
-                text.into()
+                let copy_bt = button("copy").on_press(Message::Copy(data.data.clone()));
+                row(vec![text.into(), copy_bt.into()])
+                    .align_items(Alignment::Center)
+                    .padding(5)
+                    .into()
             }
         })
         .collect();
