@@ -30,14 +30,16 @@ use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
+use websocket_chatroom::{WebSocketClientToServerMessage, WebSocketServerToClientMessage};
 
 type Tx = UnboundedSender<Message>;
-type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
+type PeerMap = Arc<Mutex<HashMap<SocketAddr, (Tx, u32, String)>>>;
 
 async fn handle_connection(
     peer_map: PeerMap,
     raw_stream: TcpStream,
     addr: SocketAddr,
+    user_id: u32,
 ) -> eyre::Result<()> {
     println!("Incoming TCP connection from: {}", addr);
 
@@ -46,29 +48,76 @@ async fn handle_connection(
 
     // Insert the write part of this peer to the peer map.
     let (tx, rx) = unbounded();
-    peer_map.lock().unwrap().insert(addr, tx);
 
     let (outgoing, incoming) = ws_stream.split();
-
     let broadcast_incoming = incoming.try_for_each(|msg| {
         println!(
             "Received a message from {}: {}",
             addr,
             msg.to_text().unwrap()
         );
-        let peers = peer_map.lock().unwrap();
+        let mut peers = peer_map.lock().unwrap();
+        match msg {
+            Message::Text(text) => {
+                let message: WebSocketClientToServerMessage = serde_json::from_str(&text).unwrap();
+                match message {
+                    WebSocketClientToServerMessage::UserMessage(message_data) => {
+                        // We want to broadcast the message to everyone except ourselves.
+                        let broadcast_recipients = peers
+                            .iter()
+                            .filter(|(peer_addr, _)| peer_addr != &&addr)
+                            .map(|(_, (ws_sink, ..))| ws_sink);
+                        let message_server_to_client =
+                            WebSocketServerToClientMessage::UserMessage(message_data);
+                        let msg = Message::Text(
+                            serde_json::to_string(&message_server_to_client).unwrap(),
+                        );
+                        for recp in broadcast_recipients {
+                            recp.unbounded_send(msg.clone()).unwrap();
+                        }
+                    }
+                    WebSocketClientToServerMessage::Connect(user_name) => {
+                        peers.insert(addr, (tx.clone(), user_id, user_name.clone()));
 
-        // We want to broadcast the message to everyone except ourselves.
-        let broadcast_recipients = peers
-            .iter()
-            .filter(|(peer_addr, _)| peer_addr != &&addr)
-            .map(|(_, ws_sink)| ws_sink);
+                        let recipient = peers.get(&addr).unwrap();
+                        let message_server_to_client =
+                            WebSocketServerToClientMessage::Connected(user_id, user_name.clone());
+                        let recipient_others = peers
+                            .iter()
+                            .filter(|(peer_addr, _)| peer_addr != &&addr)
+                            .map(|(_, (ws_sink, ..))| ws_sink);
+                        let others_message = WebSocketServerToClientMessage::NewUserAdded(
+                            user_id,
+                            user_name.clone(),
+                        );
+                        let all_usr_message = WebSocketServerToClientMessage::AllUsers(
+                            peers
+                                .iter()
+                                .map(|(_, (_, user_id, user_name))| (*user_id, user_name.clone()))
+                                .collect::<Vec<(u32, String)>>(),
+                        );
+                        let msg = Message::Text(
+                            serde_json::to_string(&message_server_to_client).unwrap(),
+                        );
+                        let others_msg =
+                            Message::Text(serde_json::to_string(&others_message).unwrap());
+                        recipient.0.unbounded_send(msg).unwrap();
+                        recipient
+                            .0
+                            .unbounded_send(Message::Text(
+                                serde_json::to_string(&all_usr_message).unwrap(),
+                            ))
+                            .unwrap();
+                        for recp in recipient_others {
+                            recp.unbounded_send(others_msg.clone()).unwrap();
+                        }
+                    }
+                }
 
-        for recp in broadcast_recipients {
-            recp.unbounded_send(msg.clone()).unwrap();
+                future::ok(())
+            }
+            _ => future::ok(()),
         }
-
-        future::ok(())
     });
 
     let receive_from_others = rx.map(Ok).forward(outgoing);
@@ -77,7 +126,12 @@ async fn handle_connection(
     future::select(broadcast_incoming, receive_from_others).await;
 
     println!("{} disconnected", &addr);
-    peer_map.lock().unwrap().remove(&addr);
+    let (_, id, name) = peer_map.lock().unwrap().remove(&addr).unwrap();
+    let message_server_to_client = WebSocketServerToClientMessage::Disconnected(id, name);
+    let msg = Message::Text(serde_json::to_string(&message_server_to_client).unwrap());
+    for (_, (ws_sink, ..)) in peer_map.lock().unwrap().iter() {
+        ws_sink.unbounded_send(msg.clone()).unwrap();
+    }
     Ok(())
 }
 
@@ -95,8 +149,10 @@ async fn main() -> Result<(), IoError> {
     println!("Listening on: {}", addr);
 
     // Let's spawn the handling of each connection in a separate task.
+    let mut user_id = 0;
     while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(state.clone(), stream, addr));
+        tokio::spawn(handle_connection(state.clone(), stream, addr, user_id));
+        user_id += 1;
     }
 
     Ok(())

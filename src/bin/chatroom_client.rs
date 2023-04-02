@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::process;
 
 use clap::Parser;
@@ -7,7 +7,9 @@ use iced::keyboard::KeyCode;
 use iced::widget::{button, column, row, scrollable, text, text_input};
 use iced::{Alignment, Application, Color, Element, Length, Settings};
 use tokio::sync::mpsc::Sender;
-use websocket_chatroom::{Connection, MessageData, WebSocketMessage};
+use websocket_chatroom::{
+    Connection, MessageData, WebSocketClientToServerMessage, WebSocketServerToClientMessage,
+};
 #[derive(Parser)]
 struct Cli {
     #[clap(short, long)]
@@ -33,14 +35,15 @@ enum ConnectionStatus {
         connection: Connection,
         input_message: String,
         user_id: u32,
+        all_users: BTreeSet<(u32, String)>,
     },
 }
 enum Page {
     /// the sender to send the url
-    Welcome(Sender<String>),
+    Welcome(Sender<(String, String)>),
     Main {
         connections_status: ConnectionStatus,
-        message_queue: VecDeque<(bool, WebSocketMessage)>,
+        message_queue: VecDeque<(bool, MessageData)>,
         log_queue: VecDeque<String>,
     },
 }
@@ -64,12 +67,12 @@ struct ChatRoom {
 
 #[derive(Debug, Clone)]
 enum Message {
-    /// the sender and the user id
-    EnterWelcome(Sender<String>),
+    /// the sender send url and user name
+    EnterWelcome(Sender<(String, String)>),
     EnterMain,
-    Connected(Connection, u32),
+    Connected(Connection, u32, Vec<(u32, String)>),
     Disconnected(String),
-    MessageReceived(WebSocketMessage),
+    MessageReceived(WebSocketServerToClientMessage),
     InputChange(String),
     UserNameChange(String),
     UrlChange(String),
@@ -116,7 +119,9 @@ impl Application for ChatRoom {
                 if let AppStatus::SubReady { page } = &mut self.app_status {
                     match page {
                         Page::Welcome(sender) => {
-                            sender.try_send(self.url.clone()).unwrap();
+                            sender
+                                .try_send((self.url.clone(), self.user_name.clone()))
+                                .unwrap();
                             *page = Page::Main {
                                 connections_status: ConnectionStatus::Disconnected,
                                 message_queue: VecDeque::new(),
@@ -131,7 +136,7 @@ impl Application for ChatRoom {
                     iced::Command::none()
                 }
             }
-            Message::Connected(connection, user_id) => {
+            Message::Connected(connection, user_id, all_users) => {
                 if let AppStatus::SubReady {
                     page:
                         Page::Main {
@@ -143,6 +148,7 @@ impl Application for ChatRoom {
                         connection,
                         input_message: String::new(),
                         user_id,
+                        all_users: all_users.into_iter().collect(),
                     };
                 }
                 iced::Command::none()
@@ -161,10 +167,29 @@ impl Application for ChatRoom {
             }
             Message::MessageReceived(message) => {
                 if let AppStatus::SubReady {
-                    page: Page::Main { message_queue, .. },
+                    page:
+                        Page::Main {
+                            message_queue,
+                            connections_status,
+                            ..
+                        },
                 } = &mut self.app_status
                 {
-                    message_queue.push_back((false, message));
+                    match connections_status {
+                        ConnectionStatus::Disconnected => {}
+                        ConnectionStatus::Connected { all_users, .. } => match message {
+                            WebSocketServerToClientMessage::UserMessage(message) => {
+                                message_queue.push_back((false, message))
+                            }
+                            WebSocketServerToClientMessage::Disconnected(id, name) => {
+                                all_users.remove(&(id, name));
+                            }
+                            WebSocketServerToClientMessage::NewUserAdded(id, name) => {
+                                all_users.insert((id, name));
+                            }
+                            _ => {}
+                        },
+                    }
                 }
                 iced::Command::none()
             }
@@ -198,19 +223,21 @@ impl Application for ChatRoom {
                                     connection,
                                     input_message,
                                     user_id,
+                                    ..
                                 },
                             message_queue,
                             ..
                         },
                 } = &mut self.app_status
                 {
-                    let message = WebSocketMessage::UserMessage(MessageData {
+                    let data = MessageData {
                         id: *user_id,
                         name: self.user_name.clone(),
                         data: input_message.clone(),
-                    });
+                    };
+                    let message = WebSocketClientToServerMessage::UserMessage(data.clone());
 
-                    message_queue.push_back((true, message.clone()));
+                    message_queue.push_back((true, data));
                     let mut connection = connection.clone();
                     iced::Command::perform(
                         async move {
@@ -271,7 +298,9 @@ impl Application for ChatRoom {
 
     fn subscription(&self) -> iced::Subscription<Self::Message> {
         let web_socket_sub = websocket_chatroom::connect().map(|event| match event {
-            websocket_chatroom::Event::Connected(sender) => Message::Connected(sender, 0),
+            websocket_chatroom::Event::Connected(sender, id, all_users) => {
+                Message::Connected(sender, id, all_users)
+            }
             websocket_chatroom::Event::Disconnected => {
                 Message::Disconnected("Disconnected".to_string())
             }
@@ -314,8 +343,15 @@ impl Application for ChatRoom {
                     ConnectionStatus::Connected {
                         input_message,
                         user_id,
+                        all_users,
                         ..
-                    } => self.connected_view(message_queue, log_queue, input_message, *user_id),
+                    } => self.connected_view(
+                        message_queue,
+                        log_queue,
+                        input_message,
+                        *user_id,
+                        all_users.iter(),
+                    ),
                 },
             },
         }
@@ -339,7 +375,7 @@ impl ChatRoom {
 
     fn disconnected_view(
         &self,
-        message_queue: &VecDeque<(bool, WebSocketMessage)>,
+        message_queue: &VecDeque<(bool, MessageData)>,
         log_queue: &VecDeque<String>,
     ) -> Element<Message> {
         let text = text("Disconnected")
@@ -354,12 +390,13 @@ impl ChatRoom {
         col.into()
     }
 
-    fn connected_view(
+    fn connected_view<'a>(
         &self,
-        message_queue: &VecDeque<(bool, WebSocketMessage)>,
+        message_queue: &VecDeque<(bool, MessageData)>,
         log_queue: &VecDeque<String>,
         input_message: &str,
         user_id: u32,
+        all_users: impl IntoIterator<Item = &'a (u32, String)>,
     ) -> Element<Message> {
         let status = format!("Connected: id: {user_id}, name: {}", self.user_name);
         let status_text = text(status).size(20).style(Color::from_rgb8(102, 102, 153));
@@ -375,11 +412,20 @@ impl ChatRoom {
             text_input("input here", input_message, |msg| Message::InputChange(msg));
 
         let msg_log_row = build_msg_and_log(message_queue, log_queue);
+        let all_connected_users: Vec<Element<Message>> = all_users
+            .into_iter()
+            .map(|user| {
+                let text = text(format!("{}: {}", user.0, user.1)).size(20);
+                text.into()
+            })
+            .collect();
+        let user_scroll = scrollable(row(all_connected_users)).height(Length::Fill);
         let col = column(vec![
             status_text.into(),
             bt_row.into(),
             input_message.into(),
             msg_log_row.into(),
+            user_scroll.into(),
         ])
         .align_items(Alignment::Center)
         .padding(10)
@@ -390,26 +436,25 @@ impl ChatRoom {
 }
 
 fn build_msg_and_log(
-    message_queue: &VecDeque<(bool, WebSocketMessage)>,
+    message_queue: &VecDeque<(bool, MessageData)>,
     log_queue: &VecDeque<String>,
 ) -> Element<'static, Message> {
     let chat_messages = message_queue
         .iter()
-        .map(|msg| match &msg.1 {
-            WebSocketMessage::UserMessage(data) => {
-                let text = text(format!("{}: {}", data.name, data.data)).size(20);
+        .map(|msg| {
+            let data = &msg.1;
+            let text = text(format!("{}: {}", data.name, data.data)).size(20);
 
-                let text = if msg.0 {
-                    text.style(Color::from_rgb8(204, 51, 0))
-                } else {
-                    text.style(Color::from_rgb8(0, 51, 102))
-                };
-                let copy_bt = button("copy").on_press(Message::Copy(data.data.clone()));
-                row(vec![text.into(), copy_bt.into()])
-                    .align_items(Alignment::Center)
-                    .padding(5)
-                    .into()
-            }
+            let text = if msg.0 {
+                text.style(Color::from_rgb8(204, 51, 0))
+            } else {
+                text.style(Color::from_rgb8(0, 51, 102))
+            };
+            let copy_bt = button("copy").on_press(Message::Copy(data.data.clone()));
+            row(vec![text.into(), copy_bt.into()])
+                .align_items(Alignment::Center)
+                .padding(5)
+                .into()
         })
         .collect();
     let logs = log_queue

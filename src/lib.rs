@@ -17,8 +17,21 @@ pub struct MessageData {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum WebSocketMessage {
+pub enum WebSocketClientToServerMessage {
     UserMessage(MessageData),
+    Connect(String),
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum WebSocketServerToClientMessage {
+    UserMessage(MessageData),
+    /// self connect success
+    Connected(u32, String),
+    /// other user connect
+    NewUserAdded(u32, String),
+    /// other user disconnect
+    Disconnected(u32, String),
+    /// all users
+    AllUsers(Vec<(u32, String)>),
 }
 
 pub fn connect() -> Subscription<Event> {
@@ -30,21 +43,52 @@ pub fn connect() -> Subscription<Event> {
             async move {
                 match state {
                     State::Stoped(mut receiver) => {
-                        let url = receiver.recv().await.unwrap();
-                        (None, State::Disconnected(url))
+                        let (url, user_name) = receiver.recv().await.unwrap();
+                        (None, State::Disconnected(url, user_name))
                     }
                     State::WaitingUrl => {
                         let (sender, receiver) = tokio::sync::mpsc::channel(10);
                         (Some(Event::ReadyToConnect(sender)), State::Stoped(receiver))
                     }
-                    State::Disconnected(url) => {
+                    State::Disconnected(url, user_name) => {
                         match tokio_tungstenite::connect_async(&url).await {
-                            Ok((websocket, _)) => {
+                            Ok((mut websocket, _)) => {
                                 let (sender, receiver) = tokio::sync::mpsc::channel(10);
-
+                                // send the connect message to server
+                                let message = WebSocketClientToServerMessage::Connect(user_name);
+                                let message = serde_json::to_string(&message).unwrap();
+                                websocket.send(Message::Text(message)).await.unwrap();
+                                // receive the id from server
+                                let (id, user_name) = match websocket.next().await {
+                                    Some(Ok(Message::Text(message))) => {
+                                        let message: WebSocketServerToClientMessage =
+                                            serde_json::from_str(&message).unwrap();
+                                        match message {
+                                            WebSocketServerToClientMessage::Connected(
+                                                id,
+                                                user_name,
+                                            ) => (id, user_name),
+                                            _ => panic!("Unexpected message"),
+                                        }
+                                    }
+                                    _ => panic!("Unexpected message"),
+                                };
+                                let all_users = match websocket.next().await {
+                                    Some(Ok(Message::Text(message))) => {
+                                        let message: WebSocketServerToClientMessage =
+                                            serde_json::from_str(&message).unwrap();
+                                        match message {
+                                            WebSocketServerToClientMessage::AllUsers(all_users) => {
+                                                all_users
+                                            }
+                                            _ => panic!("Unexpected message"),
+                                        }
+                                    }
+                                    _ => panic!("Unexpected message"),
+                                };
                                 (
-                                    Some(Event::Connected(Connection(sender))),
-                                    State::Connected(websocket, receiver, url),
+                                    Some(Event::Connected(Connection(sender), id, all_users)),
+                                    State::Connected(websocket, receiver, url, user_name),
                                 )
                             }
                             Err(_) => {
@@ -52,45 +96,51 @@ pub fn connect() -> Subscription<Event> {
                                 println!("Connection failed... Retrying...");
                                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-                                (Some(Event::Disconnected), State::Disconnected(url))
+                                (
+                                    Some(Event::Disconnected),
+                                    State::Disconnected(url, user_name),
+                                )
                             }
                         }
                     }
-                    State::Connected(mut websocket, mut input, url) => {
+                    State::Connected(mut websocket, mut input, url, user_name) => {
                         let mut fused_websocket = websocket.by_ref().fuse();
                         let on_receive_remote =
                             |received,
                              websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
-                             input: Receiver<WebSocketMessage>,
-                             url| {
+                             input: Receiver<WebSocketClientToServerMessage>,
+                             url,
+                             user_name| {
                                 match received {
                                     Ok(Message::Text(message)) => {
-                                        let message: WebSocketMessage =
+                                        let message: WebSocketServerToClientMessage =
                                             serde_json::from_str(&message).unwrap();
-                                        match message {
-                                            WebSocketMessage::UserMessage(message) => (
-                                                Some(Event::MessageReceived(
-                                                    WebSocketMessage::UserMessage(message),
-                                                )),
-                                                State::Connected(websocket, input, url),
-                                            ),
-                                        }
+                                        (
+                                            Some(Event::MessageReceived(message)),
+                                            State::Connected(websocket, input, url, user_name),
+                                        )
                                     }
-                                    Ok(_) => (None, State::Connected(websocket, input, url)),
-                                    Err(_) => (Some(Event::Disconnected), State::Disconnected(url)),
+                                    Ok(_) => {
+                                        (None, State::Connected(websocket, input, url, user_name))
+                                    }
+                                    Err(_) => (
+                                        Some(Event::Disconnected),
+                                        State::Disconnected(url, user_name),
+                                    ),
                                 }
                             };
                         let on_received_user_input =
                             |message,
                              mut websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
                              input,
-                             url| async move {
+                             url,
+                             user_name| async move {
                                 let message = match message {
                                     Some(message) => message,
                                     None => {
                                         return (
                                             Some(Event::Disconnected),
-                                            State::Disconnected(url),
+                                            State::Disconnected(url, user_name),
                                         );
                                     }
                                 };
@@ -98,18 +148,21 @@ pub fn connect() -> Subscription<Event> {
                                 let result = websocket.send(Message::Text(message)).await;
 
                                 if result.is_ok() {
-                                    (None, State::Connected(websocket, input, url))
+                                    (None, State::Connected(websocket, input, url, user_name))
                                 } else {
-                                    (Some(Event::Disconnected), State::Disconnected(url))
+                                    (
+                                        Some(Event::Disconnected),
+                                        State::Disconnected(url, user_name),
+                                    )
                                 }
                             };
                         tokio::select! {
                             received = fused_websocket.select_next_some() => {
-                                on_receive_remote(received,websocket,input,url)
+                                on_receive_remote(received,websocket,input,url,user_name)
                             }
 
                             message = input.recv() => {
-                                on_received_user_input(message,websocket,input,url).await
+                                on_received_user_input(message,websocket,input,url,user_name).await
 
                             }
                         }
@@ -122,31 +175,32 @@ pub fn connect() -> Subscription<Event> {
 #[derive(Debug)]
 enum State {
     WaitingUrl,
-    Stoped(Receiver<String>),
-    Disconnected(String),
+    Stoped(Receiver<(String, String)>),
+    Disconnected(String, String),
     Connected(
         WebSocketStream<MaybeTlsStream<TcpStream>>,
-        Receiver<WebSocketMessage>,
+        Receiver<WebSocketClientToServerMessage>,
+        String,
         String,
     ),
 }
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    ReadyToConnect(Sender<String>),
-    Connected(Connection),
+    ReadyToConnect(Sender<(String, String)>),
+    Connected(Connection, u32, Vec<(u32, String)>),
     Disconnected,
-    MessageReceived(WebSocketMessage),
+    MessageReceived(WebSocketServerToClientMessage),
 }
 
 #[derive(Debug, Clone)]
-pub struct Connection(Sender<WebSocketMessage>);
+pub struct Connection(Sender<WebSocketClientToServerMessage>);
 
 impl Connection {
     pub async fn send(
         &mut self,
-        message: WebSocketMessage,
-    ) -> Result<(), tokio::sync::mpsc::error::TrySendError<WebSocketMessage>> {
+        message: WebSocketClientToServerMessage,
+    ) -> Result<(), tokio::sync::mpsc::error::TrySendError<WebSocketClientToServerMessage>> {
         self.0.try_send(message)
     }
 }
