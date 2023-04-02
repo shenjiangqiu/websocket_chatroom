@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
+use std::process;
 
 use clap::Parser;
 use iced::keyboard::KeyCode;
 use iced::widget::{button, column, row, scrollable, text, text_input};
 use iced::{Alignment, Application, Color, Element, Length, Settings};
+use tokio::sync::mpsc::Sender;
 use websocket_chatroom::{Connection, MessageData, WebSocketMessage};
 #[derive(Parser)]
 struct Cli {
@@ -24,27 +26,51 @@ pub fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-enum AppStatus {
+enum ConnectionStatus {
     Disconnected,
-    Connected(Connection, u32, String),
+    Connected {
+        connection: Connection,
+        input_message: String,
+        user_id: u32,
+    },
 }
+enum Page {
+    Welcome(Sender<String>),
+    Main {
+        connections_status: ConnectionStatus,
+        message_queue: VecDeque<(bool, WebSocketMessage)>,
+        log_queue: VecDeque<String>,
+    },
+}
+
+enum AppStatus {
+    /// waiting for the subscription to be ready
+    WaitingSubscribtion,
+
+    /// data: the url sender, the user name
+    SubReady {
+        /// the page type
+        page: Page,
+    },
+}
+
 struct ChatRoom {
-    server_url: String,
     app_status: AppStatus,
-    current_message: Option<String>,
-    message_queue: VecDeque<(bool, WebSocketMessage)>,
-    log_queue: VecDeque<String>,
-    input_message: String,
-    msg_id: u32,
+    user_name: String,
+    url: String,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     /// the sender and the user id
+    EnterWelcome(Sender<String>),
+    EnterMain,
     Connected(Connection, u32),
     Disconnected(String),
     MessageReceived(WebSocketMessage),
     InputChange(String),
+    UserNameChange(String),
+    UrlChange(String),
     Send,
     Sent,
     Clear,
@@ -63,13 +89,9 @@ impl Application for ChatRoom {
     fn new(socket_addr: Self::Flags) -> (Self, iced::Command<Self::Message>) {
         (
             Self {
-                server_url: socket_addr,
-                app_status: AppStatus::Disconnected,
-                current_message: None,
-                message_queue: VecDeque::new(),
-                input_message: String::new(),
-                log_queue: VecDeque::new(),
-                msg_id: 0,
+                app_status: AppStatus::WaitingSubscribtion,
+                user_name: String::new(),
+                url: socket_addr,
             },
             iced::Command::none(),
         )
@@ -81,83 +103,182 @@ impl Application for ChatRoom {
 
     fn update(&mut self, message: Message) -> iced::Command<Message> {
         match message {
-            Message::Connected(sender, user_id) => {
-                self.app_status = AppStatus::Connected(sender, user_id, "ppsjq".to_string());
-                self.current_message = Some("Connected".to_string());
+            Message::EnterWelcome(url_sender) => {
+                self.app_status = AppStatus::SubReady {
+                    page: Page::Welcome(url_sender),
+                };
                 iced::Command::none()
             }
-            Message::Disconnected(error_message) => {
-                self.app_status = AppStatus::Disconnected;
-                self.current_message = Some(error_message);
-                iced::Command::none()
-            }
-            Message::MessageReceived(msg) => {
-                self.message_queue.push_back((false, msg));
-                if self.message_queue.len() > 100 {
-                    self.message_queue.pop_front();
-                }
-                iced::Command::none()
-            }
+            Message::EnterMain => {
+                if let AppStatus::SubReady { page } = &mut self.app_status {
+                    match page {
+                        Page::Welcome(sender) => {
+                            sender.try_send(self.url.clone()).unwrap();
+                            *page = Page::Main {
+                                connections_status: ConnectionStatus::Disconnected,
+                                message_queue: VecDeque::new(),
+                                log_queue: VecDeque::new(),
+                            };
+                        }
+                        _ => {}
+                    }
 
-            Message::Exit => {
-                std::process::exit(0);
-            }
-            Message::Send => match &self.app_status {
-                AppStatus::Disconnected => {
-                    self.current_message = Some("Disconnected, cannot send".to_string());
+                    iced::Command::none()
+                } else {
                     iced::Command::none()
                 }
-                AppStatus::Connected(connection, id, name) => {
-                    let msg = self.input_message.clone();
-                    let msg = WebSocketMessage::UserMessage(MessageData {
-                        id: *id,
-                        name: name.clone(),
-                        data: msg,
-                    });
-                    self.input_message = String::new();
-                    self.msg_id += 1;
-                    self.message_queue.push_back((true, msg.clone()));
-                    if self.message_queue.len() > 100 {
-                        self.message_queue.pop_front();
-                    }
-                    self.log_queue.push_back(format!("Sending {}", self.msg_id));
-                    let mut sender = connection.clone();
-                    iced::Command::perform(async move { sender.send(msg).await }, |res| match res {
-                        Ok(_) => Message::Sent,
-                        Err(_e) => Message::Exit,
-                    })
+            }
+            Message::Connected(connection, user_id) => {
+                if let AppStatus::SubReady {
+                    page:
+                        Page::Main {
+                            connections_status, ..
+                        },
+                } = &mut self.app_status
+                {
+                    *connections_status = ConnectionStatus::Connected {
+                        connection,
+                        input_message: String::new(),
+                        user_id,
+                    };
                 }
-            },
-            Message::Sent => {
-                self.log_queue.push_back(format!("Sent {}", self.msg_id));
-                if self.log_queue.len() > 100 {
-                    self.log_queue.pop_front();
+                iced::Command::none()
+            }
+            Message::Disconnected(_error_message) => {
+                if let AppStatus::SubReady {
+                    page:
+                        Page::Main {
+                            connections_status, ..
+                        },
+                } = &mut self.app_status
+                {
+                    *connections_status = ConnectionStatus::Disconnected;
+                }
+                iced::Command::none()
+            }
+            Message::MessageReceived(message) => {
+                if let AppStatus::SubReady {
+                    page: Page::Main { message_queue, .. },
+                } = &mut self.app_status
+                {
+                    message_queue.push_back((false, message));
                 }
                 iced::Command::none()
             }
             Message::InputChange(input) => {
-                self.input_message = input;
+                if let AppStatus::SubReady {
+                    page:
+                        Page::Main {
+                            connections_status: ConnectionStatus::Connected { input_message, .. },
+                            ..
+                        },
+                } = &mut self.app_status
+                {
+                    *input_message = input;
+                }
+                iced::Command::none()
+            }
+            Message::UrlChange(url) => {
+                self.url = url;
+                iced::Command::none()
+            }
+            Message::UserNameChange(user_name) => {
+                self.user_name = user_name;
+                iced::Command::none()
+            }
+            Message::Send => {
+                if let AppStatus::SubReady {
+                    page:
+                        Page::Main {
+                            connections_status:
+                                ConnectionStatus::Connected {
+                                    connection,
+                                    input_message,
+                                    user_id,
+                                },
+                            message_queue,
+                            ..
+                        },
+                } = &mut self.app_status
+                {
+                    let message = WebSocketMessage::UserMessage(MessageData {
+                        id: *user_id,
+                        name: self.user_name.clone(),
+                        data: input_message.clone(),
+                    });
+
+                    message_queue.push_back((true, message.clone()));
+                    let mut connection = connection.clone();
+                    iced::Command::perform(
+                        async move {
+                            connection
+                                .send(message)
+                                .await
+                                .map_err(|_| "cannot send to sub")?;
+                            Ok(())
+                        },
+                        |result: Result<_, &str>| {
+                            if result.is_err() {
+                                Message::Disconnected(result.err().unwrap().to_string())
+                            } else {
+                                Message::Sent
+                            }
+                        },
+                    )
+                } else {
+                    iced::Command::none()
+                }
+            }
+            Message::Sent => {
+                if let AppStatus::SubReady {
+                    page:
+                        Page::Main {
+                            connections_status: ConnectionStatus::Connected { input_message, .. },
+                            log_queue,
+                            ..
+                        },
+                } = &mut self.app_status
+                {
+                    *input_message = String::new();
+                    log_queue.push_back("sent".to_string());
+                }
                 iced::Command::none()
             }
             Message::Clear => {
-                self.message_queue.clear();
-                self.log_queue.clear();
+                if let AppStatus::SubReady {
+                    page:
+                        Page::Main {
+                            log_queue,
+                            message_queue,
+                            ..
+                        },
+                } = &mut self.app_status
+                {
+                    log_queue.clear();
+                    message_queue.clear();
+                }
                 iced::Command::none()
+            }
+            Message::Exit => {
+                process::exit(0);
             }
         }
     }
 
     fn subscription(&self) -> iced::Subscription<Self::Message> {
-        let web_socket_sub =
-            websocket_chatroom::connect(&self.server_url).map(|event| match event {
-                websocket_chatroom::Event::Connected(sender) => Message::Connected(sender, 0),
-                websocket_chatroom::Event::Disconnected => {
-                    Message::Disconnected("Disconnected".to_string())
-                }
-                websocket_chatroom::Event::MessageReceived(message) => {
-                    Message::MessageReceived(message)
-                }
-            });
+        let web_socket_sub = websocket_chatroom::connect().map(|event| match event {
+            websocket_chatroom::Event::Connected(sender) => Message::Connected(sender, 0),
+            websocket_chatroom::Event::Disconnected => {
+                Message::Disconnected("Disconnected".to_string())
+            }
+            websocket_chatroom::Event::MessageReceived(message) => {
+                Message::MessageReceived(message)
+            }
+            websocket_chatroom::Event::ReadyToConnect(url_sender) => {
+                // enter the welcome stat
+                Message::EnterWelcome(url_sender)
+            }
+        });
         let func: fn(iced::Event, iced::event::Status) -> Option<Message> =
             |event, _status| match event {
                 iced::Event::Keyboard(key) => match key {
@@ -174,10 +295,69 @@ impl Application for ChatRoom {
     }
 
     fn view(&self) -> Element<Message> {
-        let status = match &self.app_status {
-            AppStatus::Disconnected => format!("Disconnected, server_id: {}", self.server_url),
-            AppStatus::Connected(_, id, name) => format!("Connected: id: {id}, name: {name}"),
-        };
+        match &self.app_status {
+            AppStatus::WaitingSubscribtion => text("Waiting for subscribtion init").size(20).into(),
+            AppStatus::SubReady { page } => match page {
+                Page::Welcome(_) => self.welcome_view(),
+                Page::Main {
+                    connections_status,
+                    message_queue,
+                    log_queue,
+                } => match connections_status {
+                    ConnectionStatus::Disconnected => {
+                        self.disconnected_view(message_queue, log_queue)
+                    }
+                    ConnectionStatus::Connected {
+                        input_message,
+                        user_id,
+                        ..
+                    } => self.connected_view(message_queue, log_queue, input_message, *user_id),
+                },
+            },
+        }
+    }
+}
+
+impl ChatRoom {
+    fn welcome_view(&self) -> Element<Message> {
+        let user_name = text_input("user name", &self.user_name, |msg| {
+            Message::UserNameChange(msg)
+        });
+        let url = text_input("url", &self.url, |msg| Message::UrlChange(msg));
+        let start_bt = button("start").padding(5).on_press(Message::EnterMain);
+        let col = column(vec![user_name.into(), url.into(), start_bt.into()])
+            .align_items(Alignment::Center)
+            .padding(10)
+            .width(Length::Fill)
+            .height(Length::Fill);
+        col.into()
+    }
+
+    fn disconnected_view(
+        &self,
+        message_queue: &VecDeque<(bool, WebSocketMessage)>,
+        log_queue: &VecDeque<String>,
+    ) -> Element<Message> {
+        let text = text("Disconnected")
+            .size(20)
+            .style(Color::from_rgb8(102, 102, 153));
+        let msg_log_row = build_msg_and_log(message_queue, log_queue);
+        let col = column(vec![text.into(), msg_log_row.into()])
+            .align_items(Alignment::Center)
+            .padding(10)
+            .width(Length::Fill)
+            .height(Length::Fill);
+        col.into()
+    }
+
+    fn connected_view(
+        &self,
+        message_queue: &VecDeque<(bool, WebSocketMessage)>,
+        log_queue: &VecDeque<String>,
+        input_message: &str,
+        user_id: u32,
+    ) -> Element<Message> {
+        let status = format!("Connected: id: {user_id}, name: {}", self.user_name);
         let status_text = text(status).size(20).style(Color::from_rgb8(102, 102, 153));
 
         let send_bt = button("send").padding(5).on_press(Message::Send);
@@ -187,71 +367,14 @@ impl Application for ChatRoom {
             .padding(10)
             .spacing(3)
             .align_items(Alignment::Center);
-        let input_message = text_input("input here", &self.input_message, |msg| {
-            Message::InputChange(msg)
-        });
-        let current_message = self
-            .current_message
-            .as_ref()
-            .map(|msg| scrollable(text(msg).size(20).style(Color::from_rgb8(0, 51, 102))))
-            .unwrap_or_else(|| {
-                scrollable(
-                    text("No message")
-                        .size(20)
-                        .style(Color::from_rgb8(204, 51, 0)),
-                )
-            });
-        let chat_messages = self
-            .message_queue
-            .iter()
-            .map(|msg| match &msg.1 {
-                WebSocketMessage::UserMessage(data) => {
-                    let text = text(format!("{}: {}", data.name, data.data)).size(20);
+        let input_message =
+            text_input("input here", input_message, |msg| Message::InputChange(msg));
 
-                    let text = if msg.0 {
-                        text.style(Color::from_rgb8(204, 51, 0))
-                    } else {
-                        text.style(Color::from_rgb8(0, 51, 102))
-                    };
-                    text.into()
-                }
-            })
-            .collect();
-        let logs = self
-            .log_queue
-            .iter()
-            .map(|msg| {
-                text(msg)
-                    .size(20)
-                    .style(Color::from_rgb8(0, 51, 102))
-                    .into()
-            })
-            .collect();
-        let msg_col = scrollable(
-            column(chat_messages)
-                .spacing(15)
-                .align_items(Alignment::Start)
-                .width(Length::FillPortion(8))
-                .padding(15),
-        )
-        .height(Length::Fill);
-        let log_col = scrollable(
-            column(logs)
-                .spacing(15)
-                .align_items(Alignment::End)
-                .width(Length::FillPortion(2))
-                .padding(15),
-        )
-        .height(Length::Fill);
-        let msg_log_row = row(vec![msg_col.into(), log_col.into()])
-            .spacing(15)
-            .align_items(Alignment::Start)
-            .width(Length::Fill);
+        let msg_log_row = build_msg_and_log(message_queue, log_queue);
         let col = column(vec![
             status_text.into(),
             bt_row.into(),
             input_message.into(),
-            current_message.into(),
             msg_log_row.into(),
         ])
         .align_items(Alignment::Center)
@@ -260,6 +383,57 @@ impl Application for ChatRoom {
         .height(Length::Fill);
         col.into()
     }
+}
+
+fn build_msg_and_log(
+    message_queue: &VecDeque<(bool, WebSocketMessage)>,
+    log_queue: &VecDeque<String>,
+) -> Element<'static, Message> {
+    let chat_messages = message_queue
+        .iter()
+        .map(|msg| match &msg.1 {
+            WebSocketMessage::UserMessage(data) => {
+                let text = text(format!("{}: {}", data.name, data.data)).size(20);
+
+                let text = if msg.0 {
+                    text.style(Color::from_rgb8(204, 51, 0))
+                } else {
+                    text.style(Color::from_rgb8(0, 51, 102))
+                };
+                text.into()
+            }
+        })
+        .collect();
+    let logs = log_queue
+        .iter()
+        .map(|msg| {
+            text(msg)
+                .size(20)
+                .style(Color::from_rgb8(0, 51, 102))
+                .into()
+        })
+        .collect();
+    let msg_col = scrollable(
+        column(chat_messages)
+            .spacing(15)
+            .align_items(Alignment::Start)
+            .width(Length::FillPortion(8))
+            .padding(15),
+    )
+    .height(Length::Fill);
+    let log_col = scrollable(
+        column(logs)
+            .spacing(15)
+            .align_items(Alignment::End)
+            .width(Length::FillPortion(2))
+            .padding(15),
+    )
+    .height(Length::Fill);
+    let msg_log_row = row(vec![msg_col.into(), log_col.into()])
+        .spacing(15)
+        .align_items(Alignment::Start)
+        .width(Length::Fill);
+    msg_log_row.into()
 }
 
 #[cfg(test)]
