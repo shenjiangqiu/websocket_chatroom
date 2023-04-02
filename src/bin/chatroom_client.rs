@@ -97,7 +97,7 @@ impl Application for ChatRoom {
         (
             Self {
                 app_status: AppStatus::WaitingSubscribtion,
-                user_name: String::new(),
+                user_name: "Guest".to_string(),
                 url: socket_addr,
             },
             iced::Command::none(),
@@ -416,19 +416,21 @@ impl ChatRoom {
             text_input("input here", input_message, |msg| Message::InputChange(msg));
 
         let msg_log_row = build_msg_and_log(message_queue, log_queue);
-        let all_connected_users: Vec<Element<Message>> = all_users
+        let mut all_connected_users: String = all_users
             .into_iter()
-            .map(|user| {
-                let text = text(format!("{}: {}", user.0, user.1)).size(20);
-                text.into()
-            })
-            .collect();
-        let all_users = row(all_connected_users)
-            .height(Length::Fill)
-            .width(Length::Fill);
+            .map(|user| format!("{}-{}", user.0, user.1))
+            .fold(String::new(), |mut f, s| {
+                f.push_str(&s);
+                f.push_str(" ");
+                f
+            });
+
+        info!("all users: {:?}", all_connected_users.len());
+
         let col = column(vec![
             status_text.into(),
-            all_users.into(),
+            text(format!("all users:")).into(),
+            text(all_connected_users).into(),
             bt_row.into(),
             input_message.into(),
             msg_log_row.into(),

@@ -29,5 +29,5 @@ debug = 0
 debug-assertions = false
 opt-level = 3
 [profile.release]
-lto = true
+# lto = true
 opt-level = 3
