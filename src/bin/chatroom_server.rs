@@ -30,6 +30,7 @@ use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
+use tracing::info;
 use websocket_chatroom::{WebSocketClientToServerMessage, WebSocketServerToClientMessage};
 
 type Tx = UnboundedSender<Message>;
@@ -101,13 +102,16 @@ async fn handle_connection(
                         );
                         let others_msg =
                             Message::Text(serde_json::to_string(&others_message).unwrap());
+                        info!("sending connected message: {:?}", msg);
+                        let new_user_message = serde_json::to_string(&all_usr_message).unwrap();
+
                         recipient.0.unbounded_send(msg).unwrap();
+                        info!("sending all users message: {:?}", new_user_message);
                         recipient
                             .0
-                            .unbounded_send(Message::Text(
-                                serde_json::to_string(&all_usr_message).unwrap(),
-                            ))
+                            .unbounded_send(Message::Text(new_user_message))
                             .unwrap();
+                        info!("sending new user message: {:?}", others_msg);
                         for recp in recipient_others {
                             recp.unbounded_send(others_msg.clone()).unwrap();
                         }
@@ -125,10 +129,11 @@ async fn handle_connection(
     pin_mut!(broadcast_incoming, receive_from_others);
     future::select(broadcast_incoming, receive_from_others).await;
 
-    println!("{} disconnected", &addr);
+    info!("{} disconnected", &addr);
     let (_, id, name) = peer_map.lock().unwrap().remove(&addr).unwrap();
     let message_server_to_client = WebSocketServerToClientMessage::Disconnected(id, name);
     let msg = Message::Text(serde_json::to_string(&message_server_to_client).unwrap());
+    info!("Broadcasting message: {:?}", msg);
     for (_, (ws_sink, ..)) in peer_map.lock().unwrap().iter() {
         ws_sink.unbounded_send(msg.clone()).unwrap();
     }
@@ -137,6 +142,7 @@ async fn handle_connection(
 
 #[tokio::main]
 async fn main() -> Result<(), IoError> {
+    tracing_subscriber::fmt::init();
     let addr = env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:2233".to_string());

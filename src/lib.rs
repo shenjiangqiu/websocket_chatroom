@@ -8,6 +8,7 @@ use tokio::{
     sync::mpsc::{Receiver, Sender},
 };
 use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tracing::info;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MessageData {
@@ -73,6 +74,7 @@ pub fn connect() -> Subscription<Event> {
                                     }
                                     _ => panic!("Unexpected message"),
                                 };
+                                info!("Connected to server with id: {}", id);
                                 let all_users = match websocket.next().await {
                                     Some(Ok(Message::Text(message))) => {
                                         let message: WebSocketServerToClientMessage =
@@ -86,6 +88,7 @@ pub fn connect() -> Subscription<Event> {
                                     }
                                     _ => panic!("Unexpected message"),
                                 };
+                                info!("All users: {:?}", all_users);
                                 (
                                     Some(Event::Connected(Connection(sender), id, all_users)),
                                     State::Connected(websocket, receiver, url, user_name),

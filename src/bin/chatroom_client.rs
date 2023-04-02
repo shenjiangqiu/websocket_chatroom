@@ -7,6 +7,7 @@ use iced::keyboard::KeyCode;
 use iced::widget::{button, column, row, scrollable, text, text_input};
 use iced::{Alignment, Application, Color, Element, Length, Settings};
 use tokio::sync::mpsc::Sender;
+use tracing::info;
 use websocket_chatroom::{
     Connection, MessageData, WebSocketClientToServerMessage, WebSocketServerToClientMessage,
 };
@@ -17,12 +18,12 @@ struct Cli {
 }
 
 pub fn main() -> eyre::Result<()> {
+    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     let socket_addr = cli
         .socket_addr
         .unwrap_or("wss://chat.thesjq.com".to_string())
         .parse()?;
-    println!("socket_addr: {:?}", socket_addr);
     let mut settings = Settings::with_flags(socket_addr);
     settings.default_font = Some(include_bytes!("../../assets/XiaoXiangjiaoFont-2OXpK.ttf"));
     ChatRoom::run(settings)?;
@@ -179,12 +180,15 @@ impl Application for ChatRoom {
                         ConnectionStatus::Disconnected => {}
                         ConnectionStatus::Connected { all_users, .. } => match message {
                             WebSocketServerToClientMessage::UserMessage(message) => {
+                                info!("message: {:?}", message);
                                 message_queue.push_back((false, message))
                             }
                             WebSocketServerToClientMessage::Disconnected(id, name) => {
+                                info!("message disconnected: {:?} {}", id, name);
                                 all_users.remove(&(id, name));
                             }
                             WebSocketServerToClientMessage::NewUserAdded(id, name) => {
+                                info!("message new user: {:?} {}", id, name);
                                 all_users.insert((id, name));
                             }
                             _ => {}
@@ -419,13 +423,15 @@ impl ChatRoom {
                 text.into()
             })
             .collect();
-        let user_scroll = scrollable(row(all_connected_users)).height(Length::Fill);
+        let all_users = row(all_connected_users)
+            .height(Length::Fill)
+            .width(Length::Fill);
         let col = column(vec![
             status_text.into(),
+            all_users.into(),
             bt_row.into(),
             input_message.into(),
             msg_log_row.into(),
-            user_scroll.into(),
         ])
         .align_items(Alignment::Center)
         .padding(10)
