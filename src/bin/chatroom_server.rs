@@ -142,7 +142,21 @@ async fn handle_connection(
 
 #[tokio::main]
 async fn main() -> Result<(), IoError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(
+                    "chatroom_client=info,websocket_chatroom=info,chatroom_server=info"
+                        .parse()
+                        .unwrap(),
+                )
+                .from_env_lossy(),
+        )
+        .with_ansi(true)
+        .try_init()
+        .unwrap_or_else(|e| {
+            eprintln!("failed to init logger: {}", e);
+        });
     let addr = env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:2233".to_string());

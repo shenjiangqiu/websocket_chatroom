@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 use std::collections::{BTreeSet, VecDeque};
 use std::process;
 
@@ -18,7 +19,18 @@ struct Cli {
 }
 
 pub fn main() -> eyre::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive("warn".parse().unwrap())
+                .from_env_lossy(),
+        )
+        .with_ansi(true)
+        .try_init()
+        .unwrap_or_else(|e| {
+            eprintln!("failed to init logger: {}", e);
+        });
+
     let cli = Cli::parse();
     let socket_addr = cli
         .socket_addr
@@ -416,7 +428,7 @@ impl ChatRoom {
             text_input("input here", input_message, |msg| Message::InputChange(msg));
 
         let msg_log_row = build_msg_and_log(message_queue, log_queue);
-        let mut all_connected_users: String = all_users
+        let all_connected_users: String = all_users
             .into_iter()
             .map(|user| format!("{}-{}", user.0, user.1))
             .fold(String::new(), |mut f, s| {
